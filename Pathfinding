@@ -1,0 +1,378 @@
+const GRID_SIZE = 91;
+const CELL_SIZE = 1;
+const WORLD_MIN = -45;
+
+const PLAYER_RADIUS = 0.5;
+const EXTRA_CLEARANCE = 0.15;
+
+function worldToGrid(value) {
+  return Math.max(
+    0,
+    Math.min(
+      GRID_SIZE - 1,
+      Math.round((value - WORLD_MIN) / CELL_SIZE)
+    )
+  );
+}
+
+function gridToWorld(value) {
+  return WORLD_MIN + value * CELL_SIZE;
+}
+
+function indexOf(x, z) {
+  return z * GRID_SIZE + x;
+}
+
+function heuristic(x1, z1, x2, z2) {
+  const dx = Math.abs(x1 - x2);
+  const dz = Math.abs(z1 - z2);
+
+  return Math.max(dx, dz) +
+    (Math.sqrt(2) - 1) * Math.min(dx, dz);
+}
+
+// Min-heap for efficient A* searching
+class MinHeap {
+  constructor() {
+    this.items = [];
+  }
+
+  push(item) {
+    this.items.push(item);
+
+    let index = this.items.length - 1;
+
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+
+      if (this.items[parent].f <= item.f) break;
+
+      this.items[index] = this.items[parent];
+      index = parent;
+    }
+
+    this.items[index] = item;
+  }
+
+  pop() {
+    if (this.items.length === 0) return null;
+
+    const root = this.items[0];
+    const last = this.items.pop();
+
+    if (this.items.length > 0) {
+      let index = 0;
+
+      while (true) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+
+        if (left >= this.items.length) break;
+
+        let smallest = left;
+
+        if (
+          right < this.items.length &&
+          this.items[right].f < this.items[left].f
+        ) {
+          smallest = right;
+        }
+
+        if (this.items[smallest].f >= last.f) break;
+
+        this.items[index] = this.items[smallest];
+        index = smallest;
+      }
+
+      this.items[index] = last;
+    }
+
+    return root;
+  }
+
+  get length() {
+    return this.items.length;
+  }
+}
+
+export function findPath(start, destination, obstacles) {
+  if (!start || !destination) return [];
+
+  // Create walkability grid
+  const walkable = new Uint8Array(
+    GRID_SIZE * GRID_SIZE
+  );
+
+  for (let z = 0; z < GRID_SIZE; z++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const worldX = gridToWorld(x);
+      const worldZ = gridToWorld(z);
+
+      let blocked = false;
+
+      for (const obstacle of obstacles) {
+        const dx = worldX - obstacle.x;
+        const dz = worldZ - obstacle.z;
+
+        const radius =
+          obstacle.radius +
+          PLAYER_RADIUS +
+          EXTRA_CLEARANCE;
+
+        if (dx * dx + dz * dz < radius * radius) {
+          blocked = true;
+          break;
+        }
+      }
+
+      walkable[indexOf(x, z)] = blocked ? 0 : 1;
+    }
+  }
+
+  // Find a nearby walkable starting point
+  function findNearestWalkable(x, z, maxRadius = 8) {
+    if (
+      x >= 0 &&
+      x < GRID_SIZE &&
+      z >= 0 &&
+      z < GRID_SIZE &&
+      walkable[indexOf(x, z)]
+    ) {
+      return { x, z };
+    }
+
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (let radius = 1; radius <= maxRadius; radius++) {
+      for (let dz = -radius; dz <= radius; dz++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (
+            Math.abs(dx) !== radius &&
+            Math.abs(dz) !== radius
+          ) {
+            continue;
+          }
+
+          const nx = x + dx;
+          const nz = z + dz;
+
+          if (
+            nx < 0 ||
+            nx >= GRID_SIZE ||
+            nz < 0 ||
+            nz >= GRID_SIZE
+          ) {
+            continue;
+          }
+
+          if (!walkable[indexOf(nx, nz)]) continue;
+
+          const distance = dx * dx + dz * dz;
+
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = { x: nx, z: nz };
+          }
+        }
+      }
+
+      if (best) return best;
+    }
+
+    return null;
+  }
+
+  const startGrid = findNearestWalkable(
+    worldToGrid(start.x),
+    worldToGrid(start.z)
+  );
+
+  const endGrid = findNearestWalkable(
+    worldToGrid(destination.x),
+    worldToGrid(destination.z),
+    12
+  );
+
+  if (!startGrid || !endGrid) return [];
+
+  const startIndex = indexOf(
+    startGrid.x,
+    startGrid.z
+  );
+
+  const endIndex = indexOf(
+    endGrid.x,
+    endGrid.z
+  );
+
+  if (startIndex === endIndex) {
+    return [{
+      x: gridToWorld(endGrid.x),
+      z: gridToWorld(endGrid.z),
+    }];
+  }
+
+  const gScore = new Float64Array(
+    GRID_SIZE * GRID_SIZE
+  );
+
+  gScore.fill(Infinity);
+
+  const cameFrom = new Int32Array(
+    GRID_SIZE * GRID_SIZE
+  );
+
+  cameFrom.fill(-1);
+
+  const closed = new Uint8Array(
+    GRID_SIZE * GRID_SIZE
+  );
+
+  const open = new MinHeap();
+
+  gScore[startIndex] = 0;
+
+  open.push({
+    index: startIndex,
+    x: startGrid.x,
+    z: startGrid.z,
+    f: heuristic(
+      startGrid.x,
+      startGrid.z,
+      endGrid.x,
+      endGrid.z
+    ),
+  });
+
+  const directions = [
+    [0, -1, 1],
+    [0, 1, 1],
+    [-1, 0, 1],
+    [1, 0, 1],
+    [-1, -1, Math.sqrt(2)],
+    [1, -1, Math.sqrt(2)],
+    [-1, 1, Math.sqrt(2)],
+    [1, 1, Math.sqrt(2)],
+  ];
+
+  let found = false;
+
+  while (open.length > 0) {
+    const current = open.pop();
+
+    if (closed[current.index]) continue;
+
+    closed[current.index] = 1;
+
+    if (current.index === endIndex) {
+      found = true;
+      break;
+    }
+
+    for (const [dx, dz, cost] of directions) {
+      const nx = current.x + dx;
+      const nz = current.z + dz;
+
+      if (
+        nx < 0 ||
+        nx >= GRID_SIZE ||
+        nz < 0 ||
+        nz >= GRID_SIZE
+      ) {
+        continue;
+      }
+
+      const nextIndex = indexOf(nx, nz);
+
+      if (
+        !walkable[nextIndex] ||
+        closed[nextIndex]
+      ) {
+        continue;
+      }
+
+      // Prevent cutting diagonally through obstacle corners
+      if (dx !== 0 && dz !== 0) {
+        if (
+          !walkable[indexOf(current.x + dx, current.z)] ||
+          !walkable[indexOf(current.x, current.z + dz)]
+        ) {
+          continue;
+        }
+      }
+
+      const tentativeG = gScore[current.index] + cost;
+
+      if (tentativeG < gScore[nextIndex]) {
+        cameFrom[nextIndex] = current.index;
+        gScore[nextIndex] = tentativeG;
+
+        const f =
+          tentativeG +
+          heuristic(nx, nz, endGrid.x, endGrid.z);
+
+        open.push({
+          index: nextIndex,
+          x: nx,
+          z: nz,
+          f,
+        });
+      }
+    }
+  }
+
+  if (!found) return [];
+
+  // Reconstruct route
+  const route = [];
+  let currentIndex = endIndex;
+
+  while (currentIndex !== startIndex) {
+    const x = currentIndex % GRID_SIZE;
+    const z = Math.floor(currentIndex / GRID_SIZE);
+
+    route.push({
+      x: gridToWorld(x),
+      z: gridToWorld(z),
+    });
+
+    currentIndex = cameFrom[currentIndex];
+
+    if (currentIndex === -1) return [];
+  }
+
+  route.reverse();
+
+  // Simplify route by removing unnecessary intermediate points
+  const simplified = [];
+
+  for (let i = 0; i < route.length; i++) {
+    if (
+      i === 0 ||
+      i === route.length - 1
+    ) {
+      simplified.push(route[i]);
+      continue;
+    }
+
+    const previous = route[i - 1];
+    const current = route[i];
+    const next = route[i + 1];
+
+    const direction1X = Math.sign(current.x - previous.x);
+    const direction1Z = Math.sign(current.z - previous.z);
+
+    const direction2X = Math.sign(next.x - current.x);
+    const direction2Z = Math.sign(next.z - current.z);
+
+    if (
+      direction1X !== direction2X ||
+      direction1Z !== direction2Z
+    ) {
+      simplified.push(current);
+    }
+  }
+
+  return simplified;
+}
